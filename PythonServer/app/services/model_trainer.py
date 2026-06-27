@@ -33,7 +33,7 @@ class WakeWordModel(nn.Module):
 def train_model(positive_features_path: str, negative_features_path: str, 
                 task_id: str = None, epochs: int = 20, batch_size: int = 32):
     """
-    Обучает модель на основе признаков, сохранённых VoxPulse.
+    Обучает модель на основе признаков.
     
     Аргументы:
         positive_features_path: путь к positive_features.npy
@@ -43,7 +43,7 @@ def train_model(positive_features_path: str, negative_features_path: str,
         batch_size: размер батча
     
     Возвращает:
-        str: путь к сохранённой модели
+        str: путь к сохранённой модели (.pth)
     """
     try:
         # 1. Загрузка признаков
@@ -71,7 +71,7 @@ def train_model(positive_features_path: str, negative_features_path: str,
         y_train, y_val = y[:split], y[split:]
         
         # 4. Преобразование в тензоры
-        X_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)  # добавляем канал
+        X_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
         y_train = torch.tensor(y_train, dtype=torch.long)
         X_val = torch.tensor(X_val, dtype=torch.float32).unsqueeze(1)
         y_val = torch.tensor(y_val, dtype=torch.long)
@@ -138,43 +138,13 @@ def train_model(positive_features_path: str, negative_features_path: str,
                 best_val_acc = val_acc
                 torch.save(model.state_dict(), model_path)
         
-        # 9. Конвертация в TFLite
-        tflite_path = model_path.replace('.pth', '.tflite')
-        convert_to_tflite(model, input_shape, tflite_path, device)
-        
+        # 9. Сохраняем модель как .pth (готово для C#)
         if task_id:
-            update_task(task_id, status="completed", message="Обучение завершено!", file_path=tflite_path)
+            update_task(task_id, status="completed", message="Обучение завершено!", file_path=model_path)
         
-        return tflite_path
+        return model_path
         
     except Exception as e:
         if task_id:
             update_task(task_id, status="failed", message=f"Ошибка обучения: {str(e)}")
         raise
-
-def convert_to_tflite(model, input_shape, output_path, device):
-    """Конвертирует PyTorch модель в TFLite."""
-    try:
-        import torch.onnx
-        import onnx
-        import onnx2tf
-        
-        # 1. Экспорт в ONNX
-        onnx_path = output_path.replace('.tflite', '.onnx')
-        model.eval()
-        dummy_input = torch.randn(1, 1, *input_shape).to(device)
-        torch.onnx.export(model, dummy_input, onnx_path, 
-                          input_names=['input'], output_names=['output'],
-                          dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}})
-        
-        # 2. Конвертация ONNX -> TFLite
-        onnx2tf.convert(onnx_path, output_path)
-        
-        # 3. Удаляем временный ONNX файл
-        if os.path.exists(onnx_path):
-            os.remove(onnx_path)
-            
-    except ImportError:
-        print("ONNX/TFLite конвертация не доступна. Установите onnx2tf.")
-        # Сохраняем только PyTorch модель
-        torch.save(model.state_dict(), output_path.replace('.tflite', '.pth'))
