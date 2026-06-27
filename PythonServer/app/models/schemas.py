@@ -14,6 +14,14 @@ class GenerateBatchRequest(BaseModel):
     sample_rate: int = 24000
     count_per_text: int = 10
 
+class GenerateNegativeRequest(BaseModel):
+    count: int = 100  # Количество отрицательных примеров
+    language: str = "ru"
+    sample_rate: int = 24000
+    include_similar_words: bool = True
+    include_random_words: bool = True
+    include_noise: bool = True
+
 class GenerateResponse(BaseModel):
     task_id: str
     status: str

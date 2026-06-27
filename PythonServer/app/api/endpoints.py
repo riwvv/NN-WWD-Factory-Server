@@ -2,11 +2,12 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from app.models.schemas import (
     GenerateBatchRequest, 
+    GenerateNegativeRequest,
     GenerateResponse, 
     StatusResponse
 )
 from app.services.task_manager import tasks_status, create_task, update_task
-from app.services.audio_generator import process_batch_generation
+from app.services.audio_generator import process_batch_generation, process_negative_generation
 from app.core.config import settings
 import os
 import uuid
@@ -25,6 +26,19 @@ async def generate_batch(request: GenerateBatchRequest):
         task_id=task_id, 
         status="processing", 
         message="Задача на генерацию поставлена в очередь"
+    )
+
+@router.post("/generate-negative", response_model=GenerateResponse)
+async def generate_negative(request: GenerateNegativeRequest):
+    """Генерирует пакет отрицательных примеров (шум, случайные слова, похожие слова)."""
+    task_id = str(uuid.uuid4())
+    total_files_to_generate = request.count
+    create_task(task_id, 1, total_files_to_generate)
+    asyncio.create_task(process_negative_generation(task_id, request))
+    return GenerateResponse(
+        task_id=task_id,
+        status="processing",
+        message="Задача на генерацию отрицательных примеров поставлена в очередь"
     )
 
 @router.get("/generate-status/{task_id}", response_model=StatusResponse)
@@ -62,7 +76,6 @@ async def download_file(task_id: str):
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Файл не найден на диске")
 
-    # Если это папка — архивируем
     if os.path.isdir(file_path):
         import shutil
         archive_path = file_path + ".zip"
@@ -70,17 +83,3 @@ async def download_file(task_id: str):
         return FileResponse(archive_path, filename=f"{task_id}.zip")
     
     return FileResponse(file_path, filename=os.path.basename(file_path))
-
-# Можно добавить эндпоинт для одиночной генерации (для совместимости)
-@router.post("/generate-audio", response_model=GenerateResponse)
-async def generate_audio(request: GenerateBatchRequest):
-    """Генерирует один аудиофайл (для обратной совместимости)."""
-    # Просто используем пакетный метод с одним словом
-    single_request = GenerateBatchRequest(
-        texts=[request.texts[0]] if request.texts else ["test"],
-        language=request.language,
-        speaker=request.speaker,
-        sample_rate=request.sample_rate,
-        count_per_text=1
-    )
-    return await generate_batch(single_request)
