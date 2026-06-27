@@ -99,7 +99,7 @@ async def run_full_pipeline(task_id: str, request):
         tasks_status[task_id]["sub_tasks"]["training"]["status"] = "processing"
         tasks_status[task_id]["sub_tasks"]["training"]["message"] = "Обучение начато..."
 
-        model_path = await train_model(
+        model_path = train_model(
             positive_features_path=positive_path,
             negative_features_path=negative_path,
             task_id=training_task_id,
