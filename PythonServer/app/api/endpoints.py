@@ -1,6 +1,7 @@
 # app/api/endpoints.py
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from app.core.config import settings
 from app.models.schemas import (
     GenerateBatchRequest,
     GenerateNegativeRequest,
@@ -15,6 +16,7 @@ import os
 import uuid
 import asyncio
 import shutil
+import signal
 
 router = APIRouter()
 
@@ -96,4 +98,63 @@ async def train_full_pipeline(request: GenerateFullPipelineRequest):
         task_id=task_id,
         status="processing",
         message="Полный пайплайн запущен: генерация датасета и обучение модели.",
+    )
+
+@router.post("/shutdown")
+async def shutdown():
+    """Останавливает сервер."""
+    # Отправляем сигнал завершения процессу
+    os.kill(os.getpid(), signal.SIGTERM)
+    return {"message": "Server shutting down..."}
+
+@router.get("/download-package/{task_id}")
+async def download_package(task_id: str):
+    """
+    Скачивает ZIP-архив с моделью (.pth) и конфигом (.json).
+    """
+    if task_id not in tasks_status:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+
+    status_info = tasks_status[task_id]
+    if status_info.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Модель еще не готова")
+    
+    model_path = status_info.get("file_path")
+    config_path = status_info.get("config_path")
+    
+    if not model_path or not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="Файл модели не найден")
+    
+    if not config_path or not os.path.exists(config_path):
+        raise HTTPException(status_code=404, detail="Файл конфига не найден")
+    
+    # Получаем имя для пакета из конфига (или используем task_id)
+    try:
+        import json
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        package_name = config.get("model_name", task_id)
+    except:
+        package_name = task_id
+    
+    # Создаём временную папку для пакета
+    package_dir = os.path.join(settings.PACKAGE_DIR, task_id)
+    os.makedirs(package_dir, exist_ok=True)
+    
+    # Копируем файлы в пакет
+    shutil.copy(model_path, package_dir)
+    shutil.copy(config_path, package_dir)
+    
+    # Создаём ZIP-архив
+    zip_filename = f"{package_name}_package"
+    zip_path = os.path.join(settings.PACKAGE_DIR, zip_filename)
+    shutil.make_archive(zip_path, 'zip', package_dir)
+    
+    # Очищаем временную папку
+    shutil.rmtree(package_dir)
+    
+    return FileResponse(
+        f"{zip_path}.zip", 
+        filename=f"{zip_filename}.zip",
+        media_type="application/zip"
     )

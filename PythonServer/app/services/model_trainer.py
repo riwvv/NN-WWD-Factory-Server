@@ -1,6 +1,8 @@
 import os
+import json
 import numpy as np
 import torch
+from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from .task_manager import update_task
@@ -31,9 +33,10 @@ class WakeWordModel(nn.Module):
         return self.fc2(x)
 
 def train_model(positive_features_path: str, negative_features_path: str, 
-                task_id: str = None, epochs: int = 20, batch_size: int = 32):
+                task_id: str = None, epochs: int = 20, batch_size: int = 32,
+                wake_word: str = "model", sample_rate: int = 16000):
     """
-    Обучает модель на основе признаков.
+    Обучает модель на основе признаков и сохраняет конфиг.
     
     Аргументы:
         positive_features_path: путь к positive_features.npy
@@ -41,9 +44,11 @@ def train_model(positive_features_path: str, negative_features_path: str,
         task_id: идентификатор задачи для обновления статуса
         epochs: количество эпох
         batch_size: размер батча
+        wake_word: слово для активации (используется в имени файла)
+        sample_rate: частота дискретизации
     
     Возвращает:
-        str: путь к сохранённой модели (.pth)
+        tuple: (путь к модели .pth, путь к конфигу config.json)
     """
     try:
         # 1. Загрузка признаков
@@ -94,7 +99,14 @@ def train_model(positive_features_path: str, negative_features_path: str,
         
         # 8. Обучение
         best_val_acc = 0.0
-        model_path = os.path.join(os.getcwd(), "wake_word_model.pth")
+        
+        # Имена файлов с учётом wake_word
+        base_name = wake_word.replace(" ", "_").lower()
+        model_filename = f"{base_name}_model.pth"
+        config_filename = f"{base_name}_config.json"
+        
+        model_path = os.path.join(os.getcwd(), model_filename)
+        config_path = os.path.join(os.getcwd(), config_filename)
         
         for epoch in range(epochs):
             if task_id:
@@ -138,11 +150,30 @@ def train_model(positive_features_path: str, negative_features_path: str,
                 best_val_acc = val_acc
                 torch.save(model.state_dict(), model_path)
         
-        # 9. Сохраняем модель как .pth (готово для C#)
+        # 9. Сохраняем конфиг модели
+        config = {
+            "input_height": input_shape[0],
+            "input_width": input_shape[1],
+            "n_mels": 128,
+            "n_fft": 512,
+            "hop_length": 160,
+            "sample_rate": sample_rate,
+            "wake_word": wake_word,
+            "model_name": base_name,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "best_val_acc": best_val_acc,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
         if task_id:
             update_task(task_id, status="completed", message="Обучение завершено!", file_path=model_path)
         
-        return model_path
+        # Возвращаем оба пути
+        return model_path, config_path
         
     except Exception as e:
         if task_id:

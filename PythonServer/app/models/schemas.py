@@ -30,10 +30,23 @@ class GenerateFullPipelineRequest(BaseModel):
     negative_count: int = 2000
     epochs: int = 20
 
+# --- НОВАЯ МОДЕЛЬ: Конфигурация модели для клиента ---
+class ModelConfig(BaseModel):
+    input_height: int = 128
+    input_width: int = 128
+    n_mels: int = 128
+    n_fft: int = 512
+    hop_length: int = 160
+    sample_rate: int = 16000
+    wake_word: str
+    model_name: str
+    created_at: str  # или datetime
+
 class GenerateResponse(BaseModel):
     task_id: str
     status: str
     file_path: Optional[str] = None
+    config_path: Optional[str] = None  # <-- добавили путь к конфигу
     count: Optional[int] = None
     message: Optional[str] = None
 
@@ -55,5 +68,6 @@ class StatusResponse(BaseModel):
     current_word: str = ""
     current_word_index: int = 0
     total_words: int = 0
-    file_path: Optional[str] = None
+    file_path: Optional[str] = None   # путь к .pth
+    config_path: Optional[str] = None # <-- добавили путь к config.json
     sub_tasks: Optional[Dict[str, SubTaskStatus]] = None

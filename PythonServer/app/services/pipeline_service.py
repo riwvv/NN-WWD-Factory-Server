@@ -17,116 +17,9 @@ from app.services.model_trainer import train_model
 from app.services.task_manager import tasks_status, update_task
 from app.core.config import settings
 
-async def run_full_pipeline(task_id: str, request):
-    """Выполняет полный пайплайн: генерация данных -> извлечение признаков -> обучение."""
-    try:
-        generation_task_id = f"{task_id}_gen"
-        training_task_id = f"{task_id}_train"
-
-        # 1. Создаём структуру папок для датасета
-        dataset_dir = os.path.join(settings.DATASETS_DIR, task_id)
-        positive_dir = os.path.join(dataset_dir, "positive")
-        negative_dir = os.path.join(dataset_dir, "negative")
-        os.makedirs(positive_dir, exist_ok=True)
-        os.makedirs(negative_dir, exist_ok=True)
-
-        # 2. Инициализируем статус с подзадачами
-        total_files = request.count_per_text + request.negative_count
-        tasks_status[task_id]["sub_tasks"] = {
-            "generation": {
-                "task_id": generation_task_id,
-                "status": "processing",
-                "message": "Генерация датасета начата",
-                "progress": 0,
-                "total_files": total_files,
-                "generated_files": 0,
-            },
-            "features": {
-                "task_id": f"{task_id}_feat",
-                "status": "pending",
-                "message": "Ожидание извлечения признаков",
-                "progress": 0,
-            },
-            "training": {
-                "task_id": training_task_id,
-                "status": "pending",
-                "message": "Ожидание начала обучения",
-                "progress": 0,
-            },
-        }
-        tasks_status[task_id]["message"] = "Генерация датасета..."
-
-        # 3. Генерация положительных примеров
-        update_task(task_id, message=f"Генерация положительных примеров для '{request.wake_word}'...")
-        await generate_positive_examples(
-            wake_word=request.wake_word,
-            count=request.count_per_text,
-            sample_rate=request.sample_rate,
-            output_dir=positive_dir,
-            task_id=task_id,
-            total_files=total_files,
-        )
-
-        # 4. Генерация отрицательных примеров
-        update_task(task_id, message="Генерация отрицательных примеров...")
-        await generate_negative_examples(
-            wake_word=request.wake_word,
-            count=request.negative_count,
-            sample_rate=request.sample_rate,
-            output_dir=negative_dir,
-            task_id=task_id,
-            total_files=total_files,
-        )
-
-        # 5. Обновляем статус генерации
-        tasks_status[task_id]["sub_tasks"]["generation"]["status"] = "completed"
-        tasks_status[task_id]["sub_tasks"]["generation"]["message"] = "Датасет готов"
-        tasks_status[task_id]["message"] = "Извлечение признаков..."
-        tasks_status[task_id]["progress"] = 40
-
-        # 6. Извлечение признаков (вместо VoxPulse)
-        tasks_status[task_id]["sub_tasks"]["features"]["status"] = "processing"
-        tasks_status[task_id]["sub_tasks"]["features"]["message"] = "Извлечение Mel-спектрограмм..."
-
-        positive_path, negative_path = await prepare_features(dataset_dir, task_id)
-
-        tasks_status[task_id]["sub_tasks"]["features"]["status"] = "completed"
-        tasks_status[task_id]["sub_tasks"]["features"]["message"] = "Признаки готовы"
-        tasks_status[task_id]["message"] = "Обучение модели..."
-        tasks_status[task_id]["progress"] = 60
-
-        # 7. Запускаем обучение модели
-        tasks_status[task_id]["sub_tasks"]["training"]["status"] = "processing"
-        tasks_status[task_id]["sub_tasks"]["training"]["message"] = "Обучение начато..."
-
-        model_path = train_model(
-            positive_features_path=positive_path,
-            negative_features_path=negative_path,
-            task_id=training_task_id,
-            epochs=request.epochs,
-        )
-
-        # 8. Финальный статус
-        tasks_status[task_id]["sub_tasks"]["training"]["status"] = "completed"
-        tasks_status[task_id]["sub_tasks"]["training"]["message"] = "Обучение завершено"
-        tasks_status[task_id]["sub_tasks"]["training"]["progress"] = 100
-        tasks_status[task_id]["status"] = "completed"
-        tasks_status[task_id]["message"] = f"Модель для '{request.wake_word}' успешно обучена!"
-        tasks_status[task_id]["progress"] = 100
-        tasks_status[task_id]["file_path"] = model_path
-
-        # Очищаем временную папку с датасетом (опционально)
-        # shutil.rmtree(dataset_dir)
-
-    except Exception as e:
-        tasks_status[task_id]["status"] = "failed"
-        tasks_status[task_id]["message"] = f"Ошибка в пайплайне: {str(e)}"
-        if "sub_tasks" in tasks_status[task_id]:
-            for key in ["generation", "features", "training"]:
-                if key in tasks_status[task_id]["sub_tasks"]:
-                    if tasks_status[task_id]["sub_tasks"][key]["status"] == "processing":
-                        tasks_status[task_id]["sub_tasks"][key]["status"] = "failed"
-                        tasks_status[task_id]["sub_tasks"][key]["message"] = str(e)
+# ========================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (определены ДО использования)
+# ========================================================
 
 async def generate_positive_examples(wake_word, count, sample_rate, output_dir, task_id, total_files):
     """Генерирует положительные примеры (wake word)."""
@@ -233,3 +126,122 @@ async def generate_negative_examples(wake_word, count, sample_rate, output_dir, 
         tasks_status[task_id]["sub_tasks"]["generation"]["generated_files"] = total_generated
         tasks_status[task_id]["sub_tasks"]["generation"]["progress"] = int((total_generated / total_files) * 100)
         tasks_status[task_id]["progress"] = tasks_status[task_id]["sub_tasks"]["generation"]["progress"] // 2
+
+# ========================================================
+# ОСНОВНАЯ ФУНКЦИЯ ПАЙПЛАЙНА
+# ========================================================
+
+async def run_full_pipeline(task_id: str, request):
+    """Выполняет полный пайплайн: генерация данных -> извлечение признаков -> обучение."""
+    try:
+        generation_task_id = f"{task_id}_gen"
+        training_task_id = f"{task_id}_train"
+
+        # 1. Создаём структуру папок для датасета
+        dataset_dir = os.path.join(settings.DATASETS_DIR, task_id)
+        positive_dir = os.path.join(dataset_dir, "positive")
+        negative_dir = os.path.join(dataset_dir, "negative")
+        os.makedirs(positive_dir, exist_ok=True)
+        os.makedirs(negative_dir, exist_ok=True)
+
+        # 2. Инициализируем статус с подзадачами
+        total_files = request.count_per_text + request.negative_count
+        tasks_status[task_id]["sub_tasks"] = {
+            "generation": {
+                "task_id": generation_task_id,
+                "status": "processing",
+                "message": "Генерация датасета начата",
+                "progress": 0,
+                "total_files": total_files,
+                "generated_files": 0,
+            },
+            "features": {
+                "task_id": f"{task_id}_feat",
+                "status": "pending",
+                "message": "Ожидание извлечения признаков",
+                "progress": 0,
+            },
+            "training": {
+                "task_id": training_task_id,
+                "status": "pending",
+                "message": "Ожидание начала обучения",
+                "progress": 0,
+            },
+        }
+        tasks_status[task_id]["message"] = "Генерация датасета..."
+
+        # 3. Генерация положительных примеров
+        update_task(task_id, message=f"Генерация положительных примеров для '{request.wake_word}'...")
+        await generate_positive_examples(
+            wake_word=request.wake_word,
+            count=request.count_per_text,
+            sample_rate=request.sample_rate,
+            output_dir=positive_dir,
+            task_id=task_id,
+            total_files=total_files,
+        )
+
+        # 4. Генерация отрицательных примеров
+        update_task(task_id, message="Генерация отрицательных примеров...")
+        await generate_negative_examples(
+            wake_word=request.wake_word,
+            count=request.negative_count,
+            sample_rate=request.sample_rate,
+            output_dir=negative_dir,
+            task_id=task_id,
+            total_files=total_files,
+        )
+
+        # 5. Обновляем статус генерации
+        tasks_status[task_id]["sub_tasks"]["generation"]["status"] = "completed"
+        tasks_status[task_id]["sub_tasks"]["generation"]["message"] = "Датасет готов"
+        tasks_status[task_id]["message"] = "Извлечение признаков..."
+        tasks_status[task_id]["progress"] = 40
+
+        # 6. Извлечение признаков
+        tasks_status[task_id]["sub_tasks"]["features"]["status"] = "processing"
+        tasks_status[task_id]["sub_tasks"]["features"]["message"] = "Извлечение Mel-спектрограмм..."
+
+        positive_path, negative_path = await prepare_features(dataset_dir, task_id)
+
+        tasks_status[task_id]["sub_tasks"]["features"]["status"] = "completed"
+        tasks_status[task_id]["sub_tasks"]["features"]["message"] = "Признаки готовы"
+        tasks_status[task_id]["message"] = "Обучение модели..."
+        tasks_status[task_id]["progress"] = 60
+
+        # 7. Запускаем обучение модели
+        tasks_status[task_id]["sub_tasks"]["training"]["status"] = "processing"
+        tasks_status[task_id]["sub_tasks"]["training"]["message"] = "Обучение начато..."
+
+        # train_model теперь возвращает (model_path, config_path)
+        model_path, config_path = train_model(
+            positive_features_path=positive_path,
+            negative_features_path=negative_path,
+            task_id=training_task_id,
+            epochs=request.epochs,
+            wake_word=request.wake_word,
+            sample_rate=request.sample_rate,
+        )
+
+        # 8. Финальный статус
+        tasks_status[task_id]["sub_tasks"]["training"]["status"] = "completed"
+        tasks_status[task_id]["sub_tasks"]["training"]["message"] = "Обучение завершено"
+        tasks_status[task_id]["sub_tasks"]["training"]["progress"] = 100
+        tasks_status[task_id]["status"] = "completed"
+        tasks_status[task_id]["message"] = f"Модель для '{request.wake_word}' успешно обучена!"
+        tasks_status[task_id]["progress"] = 100
+        tasks_status[task_id]["file_path"] = model_path
+        tasks_status[task_id]["config_path"] = config_path  # <--- путь к конфигу
+
+        # Очищаем временную папку с датасетом (опционально)
+        # shutil.rmtree(dataset_dir)
+
+    except Exception as e:
+        tasks_status[task_id]["status"] = "failed"
+        tasks_status[task_id]["message"] = f"Ошибка в пайплайне: {str(e)}"
+        if "sub_tasks" in tasks_status[task_id]:
+            for key in ["generation", "features", "training"]:
+                if key in tasks_status[task_id]["sub_tasks"]:
+                    if tasks_status[task_id]["sub_tasks"][key]["status"] == "processing":
+                        tasks_status[task_id]["sub_tasks"][key]["status"] = "failed"
+                        tasks_status[task_id]["sub_tasks"][key]["message"] = str(e)
