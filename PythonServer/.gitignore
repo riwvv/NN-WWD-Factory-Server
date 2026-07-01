@@ -1,0 +1,46 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+ENV/
+
+# Файлы Python
+*.pyc
+*.pyo
+__pycache__/
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Логи и данные
+logs/
+*.log
+generated_audio/
+datasets/
+packages/
+*.wav
+*.npy
+*.pth
+*.json
+
+# IDE и системные файлы
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.suo
+*.user
+*.userprefs
+
+# Файлы конфигурации с чувствительными данными
+.env
+*.local
+
+# Временные файлы
+*.tmp
+*.temp
+*.cache
