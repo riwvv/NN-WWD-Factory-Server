@@ -3,14 +3,11 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from app.core.config import settings
 from app.models.schemas import (
-    GenerateBatchRequest,
-    GenerateNegativeRequest,
     GenerateFullPipelineRequest,
     GenerateResponse,
     StatusResponse,
 )
 from app.services.task_manager import tasks_status, create_task
-from app.services.audio_generator import process_batch_generation, process_negative_generation
 from app.services.pipeline_service import run_full_pipeline
 import os
 import uuid
@@ -19,30 +16,6 @@ import shutil
 import signal
 
 router = APIRouter()
-
-@router.post("/generate-batch", response_model=GenerateResponse)
-async def generate_batch(request: GenerateBatchRequest):
-    task_id = str(uuid.uuid4())
-    total_files_to_generate = len(request.texts) * request.count_per_text
-    create_task(task_id, len(request.texts), total_files_to_generate)
-    asyncio.create_task(process_batch_generation(task_id, request))
-    return GenerateResponse(
-        task_id=task_id,
-        status="processing",
-        message="Задача на генерацию поставлена в очередь",
-    )
-
-@router.post("/generate-negative", response_model=GenerateResponse)
-async def generate_negative(request: GenerateNegativeRequest):
-    task_id = str(uuid.uuid4())
-    total_files_to_generate = request.count
-    create_task(task_id, 1, total_files_to_generate)
-    asyncio.create_task(process_negative_generation(task_id, request))
-    return GenerateResponse(
-        task_id=task_id,
-        status="processing",
-        message="Задача на генерацию отрицательных примеров поставлена в очередь",
-    )
 
 @router.get("/generate-status/{task_id}", response_model=StatusResponse)
 async def get_status(task_id: str):
@@ -134,7 +107,7 @@ async def download_package(task_id: str):
         with open(config_path, "r") as f:
             config = json.load(f)
         package_name = config.get("model_name", task_id)
-    except:
+    except Exception:
         package_name = task_id
     
     # Создаём временную папку для пакета

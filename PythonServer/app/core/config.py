@@ -1,5 +1,3 @@
-import os
-
 class Settings:
     # Основные настройки
     AUDIO_OUTPUT_DIR: str = "generated_audio"

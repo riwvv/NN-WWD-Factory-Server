@@ -6,6 +6,7 @@ from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from .task_manager import update_task
+from app.core.config import settings
 
 class WakeWordModel(nn.Module):
     """Простая свёрточная модель для детекции wake word."""
@@ -105,8 +106,9 @@ def train_model(positive_features_path: str, negative_features_path: str,
         model_filename = f"{base_name}_model.pth"
         config_filename = f"{base_name}_config.json"
         
-        model_path = os.path.join(os.getcwd(), model_filename)
-        config_path = os.path.join(os.getcwd(), config_filename)
+        os.makedirs(settings.PACKAGE_DIR, exist_ok=True)
+        model_path = os.path.join(settings.PACKAGE_DIR, model_filename)
+        config_path = os.path.join(settings.PACKAGE_DIR, config_filename)
         
         for epoch in range(epochs):
             if task_id:

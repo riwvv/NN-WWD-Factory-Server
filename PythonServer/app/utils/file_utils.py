@@ -1,7 +1,6 @@
 # app/utils/file_utils.py
 import os
 import shutil
-from pathlib import Path
 
 def ensure_directory_exists(path: str) -> None:
     """Создаёт папку, если её нет."""

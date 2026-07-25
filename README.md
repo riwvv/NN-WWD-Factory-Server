@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ### 3. Запусти сервер
 
 ```
-python app/main.py
+python main.py
 ```
 Сервер запустится на http://127.0.0.1:8000. Документация доступна по адресу: http://127.0.0.1:8000/docs.
 
@@ -39,7 +39,9 @@ python app/main.py
 |-------|------|----------|
 | `POST` | `/train-full-pipeline` | Запуск полного пайплайна обучения |
 | `GET` | `/generate-status/{task_id}` | Статус задачи |
-| `GET` | `/download-package/{task_id}` | Скачать пакет с моделью и конфигом |
+| `GET` | `/download/{task_id}` | Скачать сырой файл/архив задачи |
+| `GET` | `/download-package/{task_id}` | Скачать ZIP-пакет с моделью и конфигом |
+| `POST` | `/shutdown` | Остановить сервер (без аутентификации — не выставлять наружу без защиты) |
 
 ## 📂 Структура
 

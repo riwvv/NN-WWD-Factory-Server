@@ -1,14 +1,11 @@
 import os
 import asyncio
 import random
-import shutil
 import numpy as np
 import soundfile as sf
-from app.services.audio_generator import (
-    generate_audio_file,
-    augment_audio,
+from app.services.audio_generator import generate_audio_file, augment_audio
+from app.utils.text_utils import (
     generate_noise,
-    generate_random_text,
     generate_similar_words,
     RUSSIAN_WORDS,
 )
@@ -231,10 +228,7 @@ async def run_full_pipeline(task_id: str, request):
         tasks_status[task_id]["message"] = f"Модель для '{request.wake_word}' успешно обучена!"
         tasks_status[task_id]["progress"] = 100
         tasks_status[task_id]["file_path"] = model_path
-        tasks_status[task_id]["config_path"] = config_path  # <--- путь к конфигу
-
-        # Очищаем временную папку с датасетом (опционально)
-        # shutil.rmtree(dataset_dir)
+        tasks_status[task_id]["config_path"] = config_path
 
     except Exception as e:
         tasks_status[task_id]["status"] = "failed"
