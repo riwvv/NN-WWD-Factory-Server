@@ -12,9 +12,12 @@ class ModelConfig(BaseModel):
     input_height: int = 128
     input_width: int = 128
     n_mels: int = 128
-    n_fft: int = 512
+    n_fft: int = 1024
     hop_length: int = 160
     sample_rate: int = 16000
+    num_samples: int = 16000
+    onnx_input_name: str = "waveform"
+    onnx_output_name: str = "probabilities"
     wake_word: str
     model_name: str
     created_at: str  # или datetime
