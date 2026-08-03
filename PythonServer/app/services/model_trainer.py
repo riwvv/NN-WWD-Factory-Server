@@ -1,109 +1,97 @@
 import os
 import json
+import shutil
 import numpy as np
 import torch
-import torchaudio
 import onnx
 from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from .task_manager import update_task
-
-# Единый источник правды для параметров препроцессинга — те же значения
-# используются при подготовке признаков (feature_extractor.py) и зашиваются
-# в config.json для C#-рантайма. Никаких рассинхронов между train и inference:
-# mel-спектрограмма считается внутри самой модели и экспортируется в ONNX
-# вместе с CNN, так что математика гарантированно одна и та же везде.
-SAMPLE_RATE = 16000
-N_FFT = 1024
-HOP_LENGTH = 160
-N_MELS = 128
-INPUT_WIDTH = 128
-NUM_SAMPLES = SAMPLE_RATE * 1  # 1 секунда аудио на входе
+from .embedding_extractor import (
+    SAMPLE_RATE, NUM_SAMPLES, FEATURE_DIM, NUM_WINDOWS, EMBEDDING_DIM,
+    WINDOW_SIZE, STEP_SIZE, MELSPEC_MODEL_PATH, EMBEDDING_MODEL_PATH,
+)
 
 
-class WakeWordModel(nn.Module):
-    """CNN-детектор wake word со встроенным mel-фронтендом.
+class WakeWordHead(nn.Module):
+    """Лёгкая голова-классификатор поверх заморожённого бэкенда openWakeWord
+    (mel-спектрограмма -> Google speech_embedding, см. embedding_extractor.py).
 
-    На вход подаётся сырой waveform (batch, num_samples), а не готовая
-    Mel-спектрограмма — вся математика STFT/Mel/CNN живёт в одном графе,
-    поэтому экспорт в ONNX даёт идентичный препроцессинг и в Python, и в C#.
-    """
+    Бэкенд предобучен на огромном объёме речи и уже "знает", что такое речь
+    вообще -- модели тут остаётся выучить только различение конкретного слова
+    в этом готовом акустическом пространстве, а не акустику с нуля на паре
+    тысяч клипов (ровно то, чего не хватало старой CNN-с-нуля)."""
 
-    def __init__(self, sample_rate=SAMPLE_RATE, n_fft=N_FFT, hop_length=HOP_LENGTH,
-                 n_mels=N_MELS, input_width=INPUT_WIDTH, num_classes=2):
+    def __init__(self, in_dim: int = FEATURE_DIM, hidden: int = 64, num_classes: int = 2):
         super().__init__()
-        self.melspec = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden, num_classes),
         )
-        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB()
-        self.input_width = input_width
 
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-
-        h = n_mels // 4
-        w = input_width // 4
-        self.fc1 = nn.Linear(32 * h * w, 64)
-        self.fc2 = nn.Linear(64, num_classes)
-        self.dropout = nn.Dropout(0.3)
-
-    def forward(self, waveform):
-        # waveform: (batch, num_samples)
-        mel = self.melspec(waveform)
-        mel_db = self.amplitude_to_db(mel)
-
-        t = mel_db.shape[-1]
-        if t < self.input_width:
-            mel_db = nn.functional.pad(mel_db, (0, self.input_width - t))
-        else:
-            mel_db = mel_db[..., : self.input_width]
-
-        x = mel_db.unsqueeze(1)  # добавляем канал -> (batch, 1, n_mels, input_width)
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = self.pool(torch.relu(self.conv2(x)))
-        x = x.view(x.size(0), -1)
-        x = torch.relu(self.fc1(x))
-        x = self.dropout(x)
-        return self.fc2(x)  # сырые логиты — для CrossEntropyLoss при обучении
+    def forward(self, x):
+        return self.net(x)  # сырые логиты — для CrossEntropyLoss при обучении
 
 
-class WakeWordInferenceModel(nn.Module):
-    """Обёртка поверх WakeWordModel, добавляющая softmax — только для экспорта.
-    Обучение всегда идёт на сырых логитах (WakeWordModel.forward), а наружу
-    (в ONNX, для C#) отдаём уже готовые вероятности, чтобы не заставлять
-    потребителя пакета самому делать softmax."""
+class WakeWordHeadInference(nn.Module):
+    """Обёртка поверх WakeWordHead для экспорта: запекает нормализацию
+    (train-статистика mean/std) и softmax прямо в граф. Так экспортированный
+    onnx самодостаточен — на вход сырые (ненормализованные) эмбеддинги,
+    downstream (C#, evaluate_model.py) не нужно знать про mean/std вообще."""
 
-    def __init__(self, base_model: WakeWordModel):
+    def __init__(self, base_model: WakeWordHead, mean: np.ndarray, std: np.ndarray):
         super().__init__()
+        self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
+        self.register_buffer("std", torch.tensor(std, dtype=torch.float32))
         self.base_model = base_model
 
-    def forward(self, waveform):
-        logits = self.base_model(waveform)
+    def forward(self, x):
+        x = (x - self.mean) / self.std
+        logits = self.base_model(x)
         return nn.functional.softmax(logits, dim=1)
 
 
-def _pad_or_trim(waveform: np.ndarray, num_samples: int) -> np.ndarray:
-    if len(waveform) < num_samples:
-        return np.pad(waveform, (0, num_samples - len(waveform)))
-    return waveform[:num_samples]
+def _group_train_val_split(groups: np.ndarray, val_fraction: float = 0.2):
+    """Делит индексы на train/val по группам целиком (а не по отдельным
+    сэмплам) — аугментированные и time-shift копии одной записи (та же
+    group_id, см. feature_extractor.py) всегда оказываются на одной стороне.
+    Иначе почти неотличимые копии утекают между train и val, и val_acc
+    перестаёт что-то значить."""
+    unique_groups = np.unique(groups)
+    shuffled = np.random.permutation(unique_groups)
+    n_val_groups = max(1, int(len(shuffled) * val_fraction))
+    val_groups = set(shuffled[:n_val_groups])
+
+    val_mask = np.array([g in val_groups for g in groups])
+    train_idx = np.where(~val_mask)[0]
+    val_idx = np.where(val_mask)[0]
+    return np.random.permutation(train_idx), np.random.permutation(val_idx)
 
 
 def train_model(positive_features_path: str, negative_features_path: str,
+                 positive_groups_path: str, negative_groups_path: str,
                  task_id: str = None, epochs: int = 20, batch_size: int = 32,
                  wake_word: str = "model", sample_rate: int = SAMPLE_RATE):
     """
-    Обучает модель на сырых waveform-массивах и экспортирует готовый граф в ONNX.
+    Обучает лёгкую голову поверх заморожённых эмбеддингов openWakeWord и
+    экспортирует её в ONNX. Сам граф классификатора не содержит препроцессинг
+    (mel/embedding) — это два отдельных заморожённых .onnx-файла
+    (melspectrogram.onnx, embedding_model.onnx), которые копируются рядом
+    с результатом и должны идти в комплекте при инференсе.
 
     Аргументы:
-        positive_features_path: путь к positive_waveforms.npy
-        negative_features_path: путь к negative_waveforms.npy
+        positive_features_path: путь к positive_embeddings.npy
+        negative_features_path: путь к negative_embeddings.npy
+        positive_groups_path: путь к positive_groups.npy (для группового split)
+        negative_groups_path: путь к negative_groups.npy (для группового split)
         task_id: идентификатор задачи для обновления статуса
         epochs: количество эпох
         batch_size: размер батча
         wake_word: слово для активации (используется в имени файла)
-        sample_rate: частота дискретизации (для справки — модель всегда обучается на SAMPLE_RATE)
+        sample_rate: частота дискретизации (для справки — фичи всегда считаются на SAMPLE_RATE)
 
     Возвращает:
         tuple: (путь к модели .onnx, путь к конфигу config.json)
@@ -112,22 +100,32 @@ def train_model(positive_features_path: str, negative_features_path: str,
         if task_id:
             update_task(task_id, status="training", message="Загрузка признаков...")
 
-        positive_waveforms = np.load(positive_features_path)
-        negative_waveforms = np.load(negative_features_path)
+        positive_embeddings = np.load(positive_features_path)
+        negative_embeddings = np.load(negative_features_path)
+        positive_groups = np.load(positive_groups_path)
+        negative_groups = np.load(negative_groups_path)
 
-        X = np.concatenate([positive_waveforms, negative_waveforms], axis=0)
+        X = np.concatenate([positive_embeddings, negative_embeddings], axis=0)
         y = np.concatenate([
-            np.ones(len(positive_waveforms)),
-            np.zeros(len(negative_waveforms))
+            np.ones(len(positive_embeddings)),
+            np.zeros(len(negative_embeddings))
         ], axis=0)
+        # Префикс классом — на случай, если у positive- и negative-файла
+        # случайно совпадёт имя (после обрезки _aug{N}), группы не схлопнутся.
+        groups = np.concatenate([
+            np.char.add("pos:", positive_groups),
+            np.char.add("neg:", negative_groups),
+        ])
 
-        indices = np.random.permutation(len(X))
-        X = X[indices]
-        y = y[indices]
+        # Нормализация по train-статистике — эмбеддинги openWakeWord не
+        # отнормированы под нашу голову, без этого обучение неустойчиво.
+        train_idx, val_idx = _group_train_val_split(groups)
+        mu = X[train_idx].mean(axis=0)
+        sigma = X[train_idx].std(axis=0) + 1e-6
+        X = (X - mu) / sigma
 
-        split = int(0.8 * len(X))
-        X_train, X_val = X[:split], X[split:]
-        y_train, y_val = y[:split], y[split:]
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_val, y_val = X[val_idx], y[val_idx]
 
         X_train = torch.tensor(X_train, dtype=torch.float32)
         y_train = torch.tensor(y_train, dtype=torch.long)
@@ -139,11 +137,11 @@ def train_model(positive_features_path: str, negative_features_path: str,
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-        model = WakeWordModel()
+        model = WakeWordHead()
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model.to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         criterion = nn.CrossEntropyLoss()
 
         best_val_acc = 0.0
@@ -201,15 +199,15 @@ def train_model(positive_features_path: str, negative_features_path: str,
         model.eval()
         model.to("cpu")
 
-        inference_model = WakeWordInferenceModel(model)
+        inference_model = WakeWordHeadInference(model, mu, sigma)
         inference_model.eval()
 
-        dummy_input = torch.zeros(1, NUM_SAMPLES, dtype=torch.float32)
+        dummy_input = torch.zeros(1, FEATURE_DIM, dtype=torch.float32)
         torch.onnx.export(
             inference_model,
             dummy_input,
             onnx_path,
-            input_names=["waveform"],
+            input_names=["features"],
             output_names=["probabilities"],
             opset_version=18,
             dynamo=True,
@@ -217,9 +215,8 @@ def train_model(positive_features_path: str, negative_features_path: str,
 
         # dynamo-экспортёр по умолчанию выносит веса тензоров во внешний файл
         # {onnx_path}.data — для маленькой модели это не нужно и опасно (файл
-        # с весами легко забыть при упаковке пакета, ровно как тут и вышло).
-        # Перечитываем модель со внешними данными и сохраняем как один
-        # самодостаточный .onnx-файл без внешних зависимостей.
+        # с весами легко забыть при упаковке пакета). Перечитываем модель со
+        # внешними данными и сохраняем как один самодостаточный .onnx-файл.
         exported_model = onnx.load(onnx_path, load_external_data=True)
         onnx.save_model(exported_model, onnx_path, save_as_external_data=False)
 
@@ -227,16 +224,29 @@ def train_model(positive_features_path: str, negative_features_path: str,
         if os.path.exists(external_data_path):
             os.remove(external_data_path)
 
+        # Заморожённый бэкенд (mel + embedding) кладём рядом — без них config
+        # и голова-классификатор бесполезны, инференс — это цепочка из трёх onnx.
+        melspec_dest = os.path.join(os.getcwd(), "melspectrogram.onnx")
+        embedding_dest = os.path.join(os.getcwd(), "embedding_model.onnx")
+        shutil.copy(MELSPEC_MODEL_PATH, melspec_dest)
+        shutil.copy(EMBEDDING_MODEL_PATH, embedding_dest)
+
         config = {
-            "input_height": N_MELS,
-            "input_width": INPUT_WIDTH,
-            "n_mels": N_MELS,
-            "n_fft": N_FFT,
-            "hop_length": HOP_LENGTH,
+            "pipeline": "openwakeword_frozen_backbone",
             "sample_rate": SAMPLE_RATE,
             "num_samples": NUM_SAMPLES,
-            "onnx_input_name": "waveform",
-            "onnx_output_name": "probabilities",
+            "window_size": WINDOW_SIZE,
+            "step_size": STEP_SIZE,
+            "embedding_dim": EMBEDDING_DIM,
+            "num_windows": NUM_WINDOWS,
+            "feature_dim": FEATURE_DIM,
+            "feature_mean": mu.tolist(),
+            "feature_std": sigma.tolist(),
+            "melspec_model_file": "melspectrogram.onnx",
+            "embedding_model_file": "embedding_model.onnx",
+            "classifier_model_file": onnx_filename,
+            "classifier_input_name": "features",
+            "classifier_output_name": "probabilities",
             "wake_word": wake_word,
             "model_name": base_name,
             "epochs": epochs,
@@ -245,7 +255,10 @@ def train_model(positive_features_path: str, negative_features_path: str,
             "created_at": datetime.now().isoformat()
         }
 
-        with open(config_path, "w") as f:
+        # Без explicit encoding="utf-8" Python на Windows пишет файл в
+        # локальную кодировку консоли (cp1251 на русской локали) — кириллица
+        # в wake_word/model_name ломает файл при чтении как UTF-8 downstream.
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
 
         if task_id:

@@ -4,8 +4,8 @@ from typing import Optional, Dict
 class GenerateFullPipelineRequest(BaseModel):
     wake_word: str
     sample_rate: int = 24000
-    count_per_text: int = 1000
-    negative_count: int = 2000
+    count_per_text: int = 500
+    negative_count: int = 1000
     epochs: int = 20
 
 class ModelConfig(BaseModel):

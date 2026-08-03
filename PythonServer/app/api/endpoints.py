@@ -114,9 +114,17 @@ async def download_package(task_id: str):
     package_dir = os.path.join(settings.PACKAGE_DIR, task_id)
     os.makedirs(package_dir, exist_ok=True)
     
-    # Копируем файлы в пакет
+    # Копируем файлы в пакет: голова-классификатор + конфиг, плюс
+    # заморожённый бэкенд openWakeWord (mel + embedding), который
+    # train_model кладёт рядом с classifier-моделью — без него config
+    # бесполезен, инференс — это цепочка из трёх onnx.
     shutil.copy(model_path, package_dir)
     shutil.copy(config_path, package_dir)
+    model_dir = os.path.dirname(model_path)
+    for sidecar in ("melspectrogram.onnx", "embedding_model.onnx"):
+        sidecar_path = os.path.join(model_dir, sidecar)
+        if os.path.exists(sidecar_path):
+            shutil.copy(sidecar_path, package_dir)
     
     # Создаём ZIP-архив
     zip_filename = f"{package_name}_package"

@@ -7,8 +7,8 @@ from app.models.schemas import GenerateFullPipelineRequest, StatusResponse
 def test_generate_full_pipeline_request_defaults():
     request = GenerateFullPipelineRequest(wake_word="джарвис")
     assert request.sample_rate == 24000
-    assert request.count_per_text == 1000
-    assert request.negative_count == 2000
+    assert request.count_per_text == 500
+    assert request.negative_count == 1000
     assert request.epochs == 20
 
 

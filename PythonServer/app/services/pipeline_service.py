@@ -124,6 +124,60 @@ async def generate_negative_examples(wake_word, count, sample_rate, output_dir, 
         tasks_status[task_id]["sub_tasks"]["generation"]["progress"] = int((total_generated / total_files) * 100)
         tasks_status[task_id]["progress"] = tasks_status[task_id]["sub_tasks"]["generation"]["progress"] // 2
 
+# Сколько аугментированных копий генерировать на каждую реальную запись.
+# Без этого модель рискует выучить "отпечаток" конкретного микрофона/комнаты
+# вместо содержания звука (ровно то, что и произошло в первом прогоне).
+# Поднято с 3 до 5 вместе со снижением count_per_text/negative_count —
+# реальный голос тонул в синтетике (~15% датасета), из-за чего модель
+# путала случайную речь с ключевым словом на held-out тесте.
+REAL_SAMPLE_AUGMENTED_COPIES = 5
+
+
+def copy_real_samples(source_dir: str, dest_dir: str) -> int:
+    """Подмешивает реальные записи пользователя (не TTS-синтетику) к датасету.
+    source_dir — settings.REAL_SAMPLES_DIR/positive или .../negative, куда
+    пользователь вручную кладёт свои .wav (или любой формат, который читает
+    soundfile/librosa — частота/формат не важны, ресемплируется на этапе
+    извлечения признаков).
+
+    Каждый файл добавляется как есть, плюс несколько аугментированных
+    вариаций (тем же пайплайном, что и для синтетики — pitch/gain/шум/EQ) —
+    так модель не сможет зацепиться за конкретный "отпечаток" записи
+    (микрофон/фон комнаты), а вынуждена обобщать на сам звук.
+
+    Возвращает количество итоговых файлов (оригиналы + аугментации)."""
+    if not os.path.isdir(source_dir):
+        return 0
+
+    copied = 0
+    for filename in os.listdir(source_dir):
+        if not filename.lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".m4a")):
+            continue
+
+        src = os.path.join(source_dir, filename)
+        base_name = os.path.splitext(filename)[0]
+
+        audio, sr = sf.read(src)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)  # стерео -> моно
+        audio = audio.astype(np.float32)
+
+        # Оригинал как есть
+        dst = os.path.join(dest_dir, f"real_{base_name}.wav")
+        sf.write(dst, audio, sr)
+        copied += 1
+
+        # Плюс аугментированные копии — каждый вызов даёт свою случайную
+        # вариацию (pitch/gain/шум и т.д. применяются с вероятностью,
+        # поэтому повторные вызовы на одном и том же входе не идентичны).
+        for i in range(REAL_SAMPLE_AUGMENTED_COPIES):
+            augmented = augment_audio(audio, sr).astype(np.float32)
+            dst_aug = os.path.join(dest_dir, f"real_{base_name}_aug{i}.wav")
+            sf.write(dst_aug, augmented, sr)
+            copied += 1
+
+    return copied
+
 # ========================================================
 # ОСНОВНАЯ ФУНКЦИЯ ПАЙПЛАЙНА
 # ========================================================
@@ -189,6 +243,22 @@ async def run_full_pipeline(task_id: str, request):
             total_files=total_files,
         )
 
+        # 4.5. Подмешиваем реальные записи пользователя (если он их положил
+        # в settings.REAL_SAMPLES_DIR/positive и /negative) — это то, чего
+        # не может дать TTS: настоящий голос пользователя и настоящие
+        # нечленораздельные звуки (кашель, кряхтение и т.п.).
+        real_positive_count = copy_real_samples(
+            os.path.join(settings.REAL_SAMPLES_DIR, "positive"), positive_dir
+        )
+        real_negative_count = copy_real_samples(
+            os.path.join(settings.REAL_SAMPLES_DIR, "negative"), negative_dir
+        )
+        if real_positive_count or real_negative_count:
+            update_task(
+                task_id,
+                message=f"Подмешано реальных записей: {real_positive_count} positive, {real_negative_count} negative",
+            )
+
         # 5. Обновляем статус генерации
         tasks_status[task_id]["sub_tasks"]["generation"]["status"] = "completed"
         tasks_status[task_id]["sub_tasks"]["generation"]["message"] = "Датасет готов"
@@ -199,7 +269,7 @@ async def run_full_pipeline(task_id: str, request):
         tasks_status[task_id]["sub_tasks"]["features"]["status"] = "processing"
         tasks_status[task_id]["sub_tasks"]["features"]["message"] = "Извлечение Mel-спектрограмм..."
 
-        positive_path, negative_path = await prepare_features(dataset_dir, task_id)
+        positive_path, negative_path, positive_groups_path, negative_groups_path = await prepare_features(dataset_dir, task_id)
 
         tasks_status[task_id]["sub_tasks"]["features"]["status"] = "completed"
         tasks_status[task_id]["sub_tasks"]["features"]["message"] = "Признаки готовы"
@@ -214,6 +284,8 @@ async def run_full_pipeline(task_id: str, request):
         model_path, config_path = train_model(
             positive_features_path=positive_path,
             negative_features_path=negative_path,
+            positive_groups_path=positive_groups_path,
+            negative_groups_path=negative_groups_path,
             task_id=training_task_id,
             epochs=request.epochs,
             wake_word=request.wake_word,

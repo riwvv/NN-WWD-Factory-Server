@@ -1,3 +1,11 @@
+import os
+
+# PythonServer/app/core/config.py -> подняться на 3 уровня до PythonServer/,
+# чтобы REAL_SAMPLES_DIR не зависел от того, с каким рабочим каталогом
+# запущен процесс (C#-клиент не всегда стартует его из папки PythonServer).
+_PYTHONSERVER_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 class Settings:
     # Основные настройки
     AUDIO_OUTPUT_DIR: str = "generated_audio"
@@ -8,4 +16,14 @@ class Settings:
     DEFAULT_SPEAKER: str = "xenia"
     DEFAULT_LANGUAGE: str = "ru"
 
+    # Сюда пользователь вручную кладёт реальные записи (не синтетику TTS) —
+    # они подмешиваются к сгенерированному датасету перед обучением.
+    REAL_SAMPLES_DIR: str = os.path.join(_PYTHONSERVER_DIR, "real_samples")
+
+
 settings = Settings()
+
+# Заранее создаём папки, чтобы пользователю было очевидно, куда класть файлы,
+# даже если он ни разу не запускал обучение.
+os.makedirs(os.path.join(settings.REAL_SAMPLES_DIR, "positive"), exist_ok=True)
+os.makedirs(os.path.join(settings.REAL_SAMPLES_DIR, "negative"), exist_ok=True)
